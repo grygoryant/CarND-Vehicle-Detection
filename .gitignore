@@ -1,0 +1,6 @@
+writeup_template.md
+training_data/
+examples/
+output_images/
+.DS_Store
+*/.DS_Store
