@@ -3,4 +3,4 @@ training_data/
 examples/
 output_images/
 .DS_Store
-*/.DS_Store
+__pycache__/

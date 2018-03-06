@@ -1,5 +1,17 @@
 import os
 import sys
+from sklearn.svm import LinearSVC, SVC
+from sklearn.preprocessing import StandardScaler
+from FeatureExtractor import FeatureExtractor
+import matplotlib.image as mpimg
+import numpy as np
+import cv2
+from sklearn.cross_validation import train_test_split
+from sklearn.externals import joblib
+import matplotlib.pyplot as plt
+from collections import deque
+from scipy.ndimage.measurements import label
+from moviepy.editor import VideoFileClip
 
 def get_img_file_paths(root):
 	files_paths = []
@@ -31,26 +43,217 @@ def get_data_info(vehicles_path, non_vehicles_path):
 					'non-vehicles': non_vehicles_file_paths}
 	return data_info
 	
+def load_and_extract_features(img_paths, feature_extractor):
+	features = []
+	for path in img_paths:
+		image = mpimg.imread(path)
+		features.append(feature_extractor.process(image))
+	return features
+
+def get_sliding_windows(frame_shape, x_start_stop=[None, None], y_start_stop=[None, None], 
+                    xy_window=(64, 64), xy_overlap=(0.5, 0.5)):
+	if x_start_stop[0] == None:
+		x_start_stop[0] = 0
+	if x_start_stop[1] == None:
+		x_start_stop[1] = frame_shape[1]
+	if y_start_stop[0] == None:
+		y_start_stop[0] = 0
+	if y_start_stop[1] == None:
+		y_start_stop[1] = frame_shape[0] 
+	xspan = x_start_stop[1] - x_start_stop[0]
+	yspan = y_start_stop[1] - y_start_stop[0]
+	nx_pix_per_step = np.int(xy_window[0]*(1 - xy_overlap[0]))
+	ny_pix_per_step = np.int(xy_window[1]*(1 - xy_overlap[1]))
+	nx_buffer = np.int(xy_window[0]*(xy_overlap[0]))
+	ny_buffer = np.int(xy_window[1]*(xy_overlap[1]))
+	nx_windows = np.int((xspan-nx_buffer)/nx_pix_per_step) 
+	ny_windows = np.int((yspan-ny_buffer)/ny_pix_per_step) 
+	window_list = []
+	for ys in range(ny_windows):
+		for xs in range(nx_windows):
+			startx = xs*nx_pix_per_step + x_start_stop[0]
+			endx = startx + xy_window[0]
+			starty = ys*ny_pix_per_step + y_start_stop[0]
+			endy = starty + xy_window[1]
+			window_list.append(((startx, starty), (endx, endy)))
+	return window_list#np.array(window_list).astype(np.int64)
+
+def draw_windows(img, bboxes, color=(0, 0, 255), thick=2):
+	imcopy = np.copy(img)
+	for bbox in bboxes:
+		cv2.rectangle(imcopy, tuple(bbox[0]), tuple(bbox[1]), color, thick)
+	return imcopy
+
+def add_heat(heatmap, bbox_list):
+	for box in bbox_list:
+		heatmap[box[0][1]:box[1][1], box[0][0]:box[1][0]] += 1
+	return heatmap
+    
+def apply_threshold(heatmap, threshold):
+	heatmap[heatmap <= threshold] = 0
+	return heatmap
+
+def draw_labeled_bboxes(img, labels):
+	for car_number in range(1, labels[1]+1):
+		nonzero = (labels[0] == car_number).nonzero()
+		nonzeroy = np.array(nonzero[0])
+		nonzerox = np.array(nonzero[1])
+		bbox = ((np.min(nonzerox), np.min(nonzeroy)), (np.max(nonzerox), np.max(nonzeroy)))
+		cv2.rectangle(img, bbox[0], bbox[1], (0,0,255), 6)
+	return img
 
 class VehicleDetector:
 
 	def __init__(self):
 		print('Initializing detector...')
+		self.classifier = LinearSVC(verbose=1)
+		self.X_scaler = StandardScaler()
+		self.feature_extractor = FeatureExtractor(color_space='YCrCb', 
+			orient=9, hog_channel='ALL')
+		self.last_detections = deque(maxlen=20)
+
+	def detect_vehicles(self, img, windows):
+		on_windows = []
+		for window in windows:
+			test_img = cv2.resize(img[window[0][1]:window[1][1], 
+				window[0][0]:window[1][0]], (64, 64))
+			features = self.feature_extractor.process(test_img)
+			test_features = self.X_scaler.transform(np.array(features).reshape(1, -1))
+			prediction = self.classifier.predict(test_features)[0].astype(np.int64)
+			if prediction == 1:
+				on_windows.append(window)
+		return on_windows#np.array(on_windows).astype(np.int64)
 
 	def train(self, vehicles_path, non_vehicles_path):
 		print('Training...')
 		dataset_info = get_data_info(vehicles_path, non_vehicles_path)
+		
+		car_features = load_and_extract_features(dataset_info['vehicles'], 
+			self.feature_extractor)
 
-	def save_classifier(self, path):
+		non_car_features = load_and_extract_features(dataset_info['non-vehicles'], 
+			self.feature_extractor)
+
+		X = np.vstack((car_features, non_car_features)).astype(np.float64)
+		y = np.hstack((np.ones(len(car_features)), np.zeros(len(non_car_features))))
+
+		rand_state = np.random.randint(0, 100)
+		X_train, X_test, y_train, y_test = train_test_split(
+			X, y, test_size=0.2, random_state=rand_state)
+
+		self.X_scaler.fit(X_train)
+		X_train = self.X_scaler.transform(X_train)
+		X_test = self.X_scaler.transform(X_test)
+
+		print('Feature vector length:', len(X_train[0]))
+
+		self.classifier.fit(X_train, y_train)
+		print('Test Accuracy = ', round(self.classifier.score(X_test, y_test), 4))
+
+	def save(self, clf_path, sclr_path):
 		print('Saving classifier...')
+		joblib.dump(self.classifier, clf_path) 
+		joblib.dump(self.X_scaler, sclr_path) 
 
-	def load_classifier(self, path):
+	def load(self, clf_path, sclr_path):
 		print('Loading classifier...')
+		self.classifier = joblib.load(clf_path) 
+		self.X_scaler = joblib.load(sclr_path)
 
-	def process(self):
-		print('Processing...')
+	def get_merged_detections(self, frame_detections, img, threshold=1):
+		heat = np.zeros_like(img[:,:,0]).astype(np.float)
+		heat = add_heat(heat, frame_detections)
+		heat = apply_threshold(heat,threshold)
+		heatmap = np.clip(heat, 0, 255)
+		labels = label(heatmap)
 
+		cars = []
+		for car_number in range(1, labels[1]+1):
+			nonzero = (labels[0] == car_number).nonzero()
+			nonzeroy = np.array(nonzero[0])
+			nonzerox = np.array(nonzero[1])
+			bbox = ((np.min(nonzerox), np.min(nonzeroy)),
+				(np.max(nonzerox), np.max(nonzeroy)))
+			cars.append(bbox)
 
+		return cars, heatmap
+
+	def get_avg_detections(self, img):
+		last_detections_conc = np.concatenate(np.array(self.last_detections))
+		detections, _ = self.get_merged_detections(last_detections_conc, img,
+			threshold=min(len(self.last_detections), 15))
+		return detections
+
+	def process(self, img):
+		#np.empty([0, 2, 2], dtype=np.int64)
+		window_size = [220, 146, 117, 100]
+			#y_start_stop = [[380, 660], [370, 660], [365, 560], [360, 560]]
+		y_start_stop = [[440, 660], [414, 560], [400, 517], [390, 490]]
+		window_overlap = [0.5, 0.5, 0.5, 0.5]
+		wnd_color = [(255, 255, 0), (255, 0, 255), (0, 255, 255), (0, 255, 0)]
+
+		#window_size = [96]
+		#y_start_stop = [[350, 656]]
+
+		wnd = np.copy(img)
+		lol = np.copy(img)
+		frame_detections = []
+		for y_ss, wnd_sz, wnd_olp, color in zip(y_start_stop, window_size, 
+									window_overlap, wnd_color):
+			#windows = [((810, 387), (960, 527)), ((1014, 363),(1204, 553))]
+			windows = get_sliding_windows(img.shape, x_start_stop=[None, None], y_start_stop=y_ss, 
+                   xy_window=(wnd_sz, wnd_sz), xy_overlap=(wnd_olp, wnd_olp))
+			detections = self.detect_vehicles(img, windows)
+			#wnd = draw_windows(wnd, windows, color=color)
+			if detections:
+				frame_detections.append(detections)
+
+		if frame_detections:
+			frame_detections = np.concatenate(frame_detections)
+			merged, heatmap = self.get_merged_detections(frame_detections, img, 1)
+			#plt.imshow(heatmap, cmap='hot')
+			#plt.show()	
+			if merged:
+				self.last_detections.append(merged)
+
+			#img_boxes = draw_labeled_bboxes(np.copy(img), merged)
+			if self.last_detections:
+				detections = self.get_avg_detections(img)
+				lol = draw_windows(img, detections)
+		else:
+			print('No detections in frame!')
+		
+		#plt.imshow(heatmap, cmap='hot')
+		#plt.imshow(img_boxes)
+		#plt.imshow(wnd)
+		#plt.show()
+
+		return lol
+		
 detector = VehicleDetector()
-detector.train('./training_data/subset/vehicles_smallset/', 
-				'./training_data/subset/non-vehicles_smallset/')
+#detector.train('./training_data/subset/vehicles_smallset/', 
+#			'./training_data/subset/non-vehicles_smallset/')
+#detector.train('./training_data/full/vehicles/', 
+#			'./training_data/full/non-vehicles/')
+#detector.save('./classifier_YCrCb_lin_s.pkl', './scaler_YCrCb_lin_s.pkl')
+
+detector.load('./classifier_YCrCb_lin_s.pkl', './scaler_YCrCb_lin_s.pkl')
+
+def process_image(image):
+	res = detector.process(image)
+	return res
+
+output = './project_video_annotated.mp4'
+clip1 = VideoFileClip('./project_video.mp4').subclip(10,15)
+
+#output = './test_video_annotated.mp4'
+#clip1 = VideoFileClip('./test_video.mp4')#.subclip(45,46)
+
+white_clip = clip1.fl_image(process_image) #NOTE: this function expects color images!!
+white_clip.write_videofile(output, audio=False)
+
+#image = mpimg.imread('./test_images/test6.jpg')
+#detector.process(image)
+
+
+
