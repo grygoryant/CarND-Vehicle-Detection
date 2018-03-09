@@ -1,6 +1,7 @@
 from skimage.feature import hog
 import cv2
 import numpy as np
+import matplotlib.pyplot as plt
 
 def get_hog_features(img, orient, pix_per_cell, cell_per_block, 
                         vis=False, feature_vec=True):
@@ -9,7 +10,7 @@ def get_hog_features(img, orient, pix_per_cell, cell_per_block,
                                   pixels_per_cell=(pix_per_cell, pix_per_cell),
                                   block_norm= 'L2-Hys',
                                   cells_per_block=(cell_per_block, cell_per_block), 
-                                  transform_sqrt=True, 
+                                  transform_sqrt=False, 
                                   visualise=vis, feature_vector=feature_vec)
         return features, hog_image
     else:      
@@ -17,7 +18,7 @@ def get_hog_features(img, orient, pix_per_cell, cell_per_block,
                        pixels_per_cell=(pix_per_cell, pix_per_cell),
                        cells_per_block=(cell_per_block, cell_per_block), 
                        block_norm= 'L2-Hys',
-                       transform_sqrt=True, 
+                       transform_sqrt=False, 
                        visualise=vis, feature_vector=feature_vec)
         return features
  
@@ -73,9 +74,10 @@ class FeatureExtractor:
 			if self.hog_channel == 'ALL':
 				hog_features = []
 				for channel in range(feature_image.shape[2]):
-					hog_features.extend(get_hog_features(feature_image[:,:,channel], 
+					feat = get_hog_features(feature_image[:,:,channel], 
 						self.orient, self.pix_per_cell, self.cell_per_block, 
-						vis=False, feature_vec=True))      
+						vis=False, feature_vec=True)
+					hog_features.extend(feat) 
 			else:
 				hog_features = get_hog_features(feature_image[:,:,self.hog_channel], self.orient, 
 					self.pix_per_cell, self.cell_per_block, vis=False, feature_vec=True)

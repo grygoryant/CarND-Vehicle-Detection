@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 from collections import deque
 from scipy.ndimage.measurements import label
 from moviepy.editor import VideoFileClip
+from matplotlib import cm
 
 def get_img_file_paths(root):
 	files_paths = []
@@ -47,6 +48,8 @@ def load_and_extract_features(img_paths, feature_extractor):
 	features = []
 	for path in img_paths:
 		image = mpimg.imread(path)
+		#image = image.astype(np.float32)/255
+		image = (image*255).astype(np.uint8)
 		features.append(feature_extractor.process(image))
 	return features
 
@@ -102,11 +105,16 @@ def draw_labeled_bboxes(img, labels):
 		cv2.rectangle(img, bbox[0], bbox[1], (0,0,255), 6)
 	return img
 
+def get_colors(inp, colormap, vmin=None, vmax=None):
+	norm = plt.Normalize(vmin, vmax)
+	m = cm.ScalarMappable(norm=norm, cmap=colormap)
+	return m.to_rgba(inp)#colormap(norm(inp))
+
 class VehicleDetector:
 
 	def __init__(self):
 		print('Initializing detector...')
-		self.classifier = LinearSVC(verbose=1)
+		self.classifier = LinearSVC(verbose=True)
 		self.X_scaler = StandardScaler()
 		self.feature_extractor = FeatureExtractor(color_space='YCrCb', 
 			orient=9, hog_channel='ALL')
@@ -117,9 +125,12 @@ class VehicleDetector:
 		for window in windows:
 			test_img = cv2.resize(img[window[0][1]:window[1][1], 
 				window[0][0]:window[1][0]], (64, 64))
+			#plt.imshow(test_img)
+			#plt.show()
 			features = self.feature_extractor.process(test_img)
 			test_features = self.X_scaler.transform(np.array(features).reshape(1, -1))
 			prediction = self.classifier.predict(test_features)[0].astype(np.int64)
+			#print(prediction)
 			if prediction == 1:
 				on_windows.append(window)
 		return on_windows#np.array(on_windows).astype(np.int64)
@@ -181,79 +192,96 @@ class VehicleDetector:
 	def get_avg_detections(self, img):
 		last_detections_conc = np.concatenate(np.array(self.last_detections))
 		detections, _ = self.get_merged_detections(last_detections_conc, img,
-			threshold=min(len(self.last_detections), 15))
+			threshold=min(len(self.last_detections)-1, 15))
 		return detections
 
 	def process(self, img):
-		#np.empty([0, 2, 2], dtype=np.int64)
 		window_size = [220, 146, 117, 100]
-			#y_start_stop = [[380, 660], [370, 660], [365, 560], [360, 560]]
 		y_start_stop = [[440, 660], [414, 560], [400, 517], [390, 490]]
-		window_overlap = [0.5, 0.5, 0.5, 0.5]
+		window_overlap = [0.8, 0.8, 0.8, 0.8]
 		wnd_color = [(255, 255, 0), (255, 0, 255), (0, 255, 255), (0, 255, 0)]
 
-		#window_size = [96]
-		#y_start_stop = [[350, 656]]
+		bboxes_overlay = np.zeros_like(img)
+		heatmap_overlay = np.zeros_like(img)
 
-		wnd = np.copy(img)
-		lol = np.copy(img)
 		frame_detections = []
 		for y_ss, wnd_sz, wnd_olp, color in zip(y_start_stop, window_size, 
 									window_overlap, wnd_color):
-			#windows = [((810, 387), (960, 527)), ((1014, 363),(1204, 553))]
 			windows = get_sliding_windows(img.shape, x_start_stop=[None, None], y_start_stop=y_ss, 
                    xy_window=(wnd_sz, wnd_sz), xy_overlap=(wnd_olp, wnd_olp))
 			detections = self.detect_vehicles(img, windows)
-			#wnd = draw_windows(wnd, windows, color=color)
 			if detections:
 				frame_detections.append(detections)
 
 		if frame_detections:
 			frame_detections = np.concatenate(frame_detections)
 			merged, heatmap = self.get_merged_detections(frame_detections, img, 1)
-			#plt.imshow(heatmap, cmap='hot')
-			#plt.show()	
+
 			if merged:
 				self.last_detections.append(merged)
 
-			#img_boxes = draw_labeled_bboxes(np.copy(img), merged)
 			if self.last_detections:
 				detections = self.get_avg_detections(img)
-				lol = draw_windows(img, detections)
+				bboxes_overlay = draw_windows(bboxes_overlay, 
+					detections, color=(255,255,0))
+
+			heatmap_overlay = get_colors(heatmap, cm.hot)
+			heatmap_overlay = heatmap_overlay[:,:,:3]*255
 		else:
 			print('No detections in frame!')
+
+		return bboxes_overlay, heatmap_overlay
 		
-		#plt.imshow(heatmap, cmap='hot')
-		#plt.imshow(img_boxes)
-		#plt.imshow(wnd)
-		#plt.show()
 
-		return lol
-		
-detector = VehicleDetector()
-#detector.train('./training_data/subset/vehicles_smallset/', 
-#			'./training_data/subset/non-vehicles_smallset/')
-#detector.train('./training_data/full/vehicles/', 
-#			'./training_data/full/non-vehicles/')
-#detector.save('./classifier_YCrCb_lin_s.pkl', './scaler_YCrCb_lin_s.pkl')
+def video():
+	detector = VehicleDetector()
+	detector.load('./classifier_YCrCb_lin.pkl', './scaler_YCrCb_lin.pkl')
 
-detector.load('./classifier_YCrCb_lin_s.pkl', './scaler_YCrCb_lin_s.pkl')
+	def process_image(image):
+		res = np.copy(image)
+		bboxes_overlay, heatmap = detector.process(image)
+		small_heatmap = cv2.resize(heatmap, (0,0), fx=0.25, fy=0.25)
 
-def process_image(image):
-	res = detector.process(image)
-	return res
+		res = cv2.addWeighted(res, 1., bboxes_overlay, 1., 0.)
 
-output = './project_video_annotated.mp4'
-clip1 = VideoFileClip('./project_video.mp4').subclip(10,15)
+		x_offset = image.shape[1] - small_heatmap.shape[1] - 10
+		y_offset = 10
+		res[y_offset:y_offset + small_heatmap.shape[0], 
+			x_offset:x_offset + small_heatmap.shape[1]] = small_heatmap
+		return res
 
-#output = './test_video_annotated.mp4'
-#clip1 = VideoFileClip('./test_video.mp4')#.subclip(45,46)
+	output = './project_video_annotated.mp4'
+	clip1 = VideoFileClip('./project_video.mp4')#.subclip(10,11)
 
-white_clip = clip1.fl_image(process_image) #NOTE: this function expects color images!!
-white_clip.write_videofile(output, audio=False)
+	#output = './test_video_annotated.mp4'
+	#clip1 = VideoFileClip('./test_video.mp4')#.subclip(45,46)
 
-#image = mpimg.imread('./test_images/test6.jpg')
-#detector.process(image)
+	white_clip = clip1.fl_image(process_image) #NOTE: this function expects color images!!
+	white_clip.write_videofile(output, audio=False)
+
+def train():
+	detector = VehicleDetector()
+	#detector.train('./training_data/subset/vehicles_smallset/', 
+	#			'./training_data/subset/non-vehicles_smallset/')
+	detector.train('./training_data/full/vehicles/', 
+				'./training_data/full/non-vehicles/')
+
+	image = mpimg.imread('./test_images/test6.jpg')
+	
+	detector.process(image)
+	
+	detector.save('./classifier_YCrCb_lin.pkl', './scaler_YCrCb_lin.pkl')
+
+
+def test():
+	for i in range(1,2):
+		img_name = 'test' + str(i) + '.jpg'
+		image = mpimg.imread('./test_images/' + img_name)
+		detector = VehicleDetector()
+		detector.load('./classifier_YCrCb_lin.pkl', './scaler_YCrCb_lin.pkl')
+		detector.process(image)
+
+video()
 
 
 
